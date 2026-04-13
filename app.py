@@ -29,6 +29,7 @@ import anthropic
 from groq import Groq
 from pypdf import PdfReader, PdfWriter
 from fpdf import FPDF
+from typing import Optional
 
 # ─────────────────────────── CONFIG ────────────────────────────────────────
 PDF_ROOT = "syllabus_pdfs"          # root folder
