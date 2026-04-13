@@ -1,3 +1,20 @@
+"""
+AI Teaching Assistant — Fully Updated v2.0
+==========================================
+Key improvements over v1:
+  • Per-branch folder structure: syllabus_pdfs/<BRANCH>/<SUBJECTCODE>.pdf
+  • Subject-code-based direct PDF lookup (no full syllabus scan needed)
+  • Removed: DuckDuckGo diagram search (unreliable), redundant CSS noise
+  • Added: Study Planner, Previous Year Q&A, Formula Sheet, Exam Mode, Topic Summary cards
+  • Cleaner routing: Claude for PDF tasks, Groq for general tasks
+  • Structured sidebar with real-time PDF inventory
+  • PDF export with cover page and table of contents
+  • Session-based chat history per subject
+  • FIX: PDF Unicode/bullet character crash fixed
+  • FIX: Multi-language code execution via Groq API (Java, C, C++, JS, Python)
+"""
+from dotenv import load_dotenv
+load_dotenv()
 import streamlit as st
 import os
 import subprocess
@@ -7,867 +24,1417 @@ import base64
 import io
 import time
 import unicodedata
+import re
 import anthropic
 from groq import Groq
-from duckduckgo_search import DDGS
 from pypdf import PdfReader, PdfWriter
 from fpdf import FPDF
 
-# ================= CONFIG =================
-PDF_FOLDER = "syllabus_pdfs"
+# ─────────────────────────── CONFIG ────────────────────────────────────────
+PDF_ROOT = "syllabus_pdfs"          # root folder
+GROQ_MODEL   = "llama-3.3-70b-versatile"
+CLAUDE_MODEL = "claude-haiku-4-5"
 
-# ================= CLIENTS =================
-groq_client   = Groq(api_key=os.getenv("GROQ_API_KEY"))
-claude_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+# ─────────────────────────── CLIENTS ────────────────────────────────────────
+@st.cache_resource
+def get_groq():
+    return Groq(api_key=os.getenv("GROQ_API_KEY", ""))
 
-# ================= PAGE CONFIG =================
-st.set_page_config(page_title="AI Teaching Assistant", layout="wide", page_icon="🎓")
+@st.cache_resource
+def get_claude():
+    return anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
 
-# ================= CSS =================
+groq_client   = get_groq()
+claude_client = get_claude()
+
+# ─────────────────────────── PAGE CONFIG ────────────────────────────────────
+st.set_page_config(
+    page_title="AI Teaching Assistant",
+    layout="wide",
+    page_icon="🎓",
+    initial_sidebar_state="expanded",
+)
+
+# ─────────────────────────── CSS ────────────────────────────────────────────
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700;900&family=DM+Sans:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Sora:wght@300;400;600;700;800&family=JetBrains+Mono:wght@400;500&family=Fraunces:ital,wght@0,400;0,700;1,400&display=swap');
 
 :root {
-    --bg-primary:  #f5f7ff;
-    --bg-card:     #ffffff;
-    --bg-elevated: #eef0fb;
-    --border:      rgba(79,99,231,0.2);
-    --accent:      #4f63e7;
-    --cyan:        #0099cc;
-    --green:       #00a878;
-    --gold:        #e6a800;
-    --text:        #1a1d2e;
-    --muted:       #6b72a0;
-    --glow:        0 0 20px rgba(79,99,231,0.15);
-    --r:           14px;
-    --rs:          8px;
+    --bg:        #0d0f1a;
+    --bg2:       #12152a;
+    --bg3:       #181c30;
+    --border:    rgba(120,140,255,0.15);
+    --accent:    #7c8fff;
+    --cyan:      #4dd9e8;
+    --green:     #3df5a8;
+    --gold:      #fbbf24;
+    --red:       #f87171;
+    --text:      #e8eaf6;
+    --muted:     #7b83b4;
+    --glow:      0 0 24px rgba(124,143,255,0.2);
+    --r:         12px;
+    --rs:        8px;
 }
-html, body, .stApp { background: var(--bg-primary) !important; color: var(--text) !important; font-family: 'DM Sans', sans-serif !important; }
+
+html, body, .stApp {
+    background: var(--bg) !important;
+    color: var(--text) !important;
+    font-family: 'Sora', sans-serif !important;
+}
 #MainMenu, footer, header { visibility: hidden; }
-.block-container { padding: 2rem 3rem !important; max-width: 1200px !important; }
-.hero { text-align: center; padding: 2.5rem 0 2rem; background: linear-gradient(180deg, rgba(79,99,231,0.05) 0%, transparent 100%); border-radius: var(--r); margin-bottom: 1rem; }
-.badge { display: inline-block; background: linear-gradient(135deg,rgba(79,99,231,0.1),rgba(0,153,204,0.08)); border: 1px solid var(--border); border-radius: 50px; padding: 5px 16px; font-size: 0.7rem; letter-spacing: 0.18em; text-transform: uppercase; color: var(--cyan); margin-bottom: 0.8rem; }
-.hero-title { font-family: 'Playfair Display', serif !important; font-size: 2.8rem !important; font-weight: 900 !important; background: linear-gradient(135deg, #1a1d2e 0%, #0099cc 50%, #4f63e7 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; margin: 0 !important; line-height: 1.2 !important; }
-.hero-sub { color: var(--muted); font-size: 0.95rem; margin-top: 0.5rem; }
-.pill { display: inline-flex; align-items: center; gap: 5px; background: rgba(79,99,231,0.07); border: 1px solid rgba(79,99,231,0.18); border-radius: 50px; padding: 3px 12px; font-size: 0.75rem; color: var(--accent); margin: 2px 3px; }
-.sec { display: flex; align-items: center; gap: 10px; font-size: 0.75rem; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent); margin: 1.8rem 0 0.7rem; }
+.block-container { padding: 1.5rem 2.5rem !important; max-width: 1280px !important; }
+
+.hero {
+    text-align: center;
+    padding: 2.2rem 0 1.8rem;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 1.5rem;
+}
+.badge {
+    display: inline-block;
+    background: rgba(124,143,255,0.1);
+    border: 1px solid rgba(124,143,255,0.3);
+    border-radius: 50px;
+    padding: 4px 14px;
+    font-size: 0.68rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--cyan);
+    margin-bottom: 0.8rem;
+}
+.hero-title {
+    font-family: 'Fraunces', serif !important;
+    font-size: 2.6rem !important;
+    font-weight: 700 !important;
+    background: linear-gradient(135deg, #e8eaf6 0%, #7c8fff 50%, #4dd9e8 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    margin: 0 !important;
+    line-height: 1.2 !important;
+}
+.hero-sub { color: var(--muted); font-size: 0.9rem; margin-top: 0.4rem; }
+.pill {
+    display: inline-flex; align-items: center; gap: 4px;
+    background: rgba(124,143,255,0.08);
+    border: 1px solid rgba(124,143,255,0.2);
+    border-radius: 50px;
+    padding: 3px 11px;
+    font-size: 0.72rem;
+    color: var(--accent);
+    margin: 2px 2px;
+}
+.sec {
+    display: flex; align-items: center; gap: 10px;
+    font-size: 0.72rem; font-weight: 700;
+    letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--accent);
+    margin: 1.6rem 0 0.6rem;
+}
 .sec::after { content:''; flex:1; height:1px; background: var(--border); }
-.stSelectbox > div > div, .stTextInput > div > div > input, .stTextArea > div > div > textarea { background: var(--bg-elevated) !important; border: 1px solid var(--border) !important; border-radius: var(--rs) !important; color: var(--text) !important; font-family: 'DM Sans', sans-serif !important; }
-.stTextInput > div > div > input:focus, .stTextArea > div > div > textarea:focus, .stSelectbox > div > div:focus-within { border-color: var(--accent) !important; box-shadow: var(--glow) !important; }
-.stTextInput label, .stTextArea label, .stSelectbox label { color: var(--muted) !important; font-size: 0.8rem !important; font-weight: 500 !important; }
-.stButton > button { width: 100% !important; background: var(--bg-elevated) !important; border: 1px solid var(--border) !important; border-radius: var(--rs) !important; color: var(--text) !important; font-family: 'DM Sans', sans-serif !important; font-size: 0.86rem !important; font-weight: 500 !important; padding: 0.6rem 1rem !important; transition: all 0.2s !important; }
-.stButton > button:hover { background: rgba(79,99,231,0.08) !important; border-color: var(--accent) !important; color: var(--accent) !important; box-shadow: var(--glow) !important; transform: translateY(-1px); }
-.stCodeBlock, pre, code { background: #f0f2ff !important; border: 1px solid var(--border) !important; border-radius: var(--rs) !important; font-family: 'JetBrains Mono', monospace !important; font-size: 0.84rem !important; color: #2d3178 !important; }
-hr { border: none !important; border-top: 1px solid var(--border) !important; margin: 1.5rem 0 !important; }
-::-webkit-scrollbar { width: 5px; }
-::-webkit-scrollbar-thumb { background: rgba(79,99,231,0.3); border-radius:3px; }
-.info-box { background: rgba(79,99,231,0.06); border: 1px solid rgba(79,99,231,0.2); border-radius: var(--rs); padding: 0.8rem 1rem; font-size: 0.85rem; color: var(--accent); margin: 0.5rem 0; }
-.warn-box { background: rgba(230,168,0,0.06); border: 1px solid rgba(230,168,0,0.25); border-radius: var(--rs); padding: 0.8rem 1rem; font-size: 0.85rem; color: var(--gold); margin: 0.5rem 0; }
-.ok-box { background: rgba(0,168,120,0.06); border: 1px solid rgba(0,168,120,0.25); border-radius: var(--rs); padding: 0.8rem 1rem; font-size: 0.85rem; color: var(--green); margin: 0.5rem 0; }
-.route-box { background: rgba(79,99,231,0.03); border: 1px solid rgba(79,99,231,0.12); border-radius: var(--rs); padding: 0.6rem 1rem; font-size: 0.78rem; color: var(--muted); margin: 0.4rem 0 0.8rem; line-height: 1.8; }
+.stSelectbox > div > div,
+.stTextInput > div > div > input,
+.stTextArea > div > div > textarea {
+    background: var(--bg2) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: var(--rs) !important;
+    color: var(--text) !important;
+    font-family: 'Sora', sans-serif !important;
+}
+.stTextInput > div > div > input:focus,
+.stTextArea > div > div > textarea:focus,
+.stSelectbox > div > div:focus-within {
+    border-color: var(--accent) !important;
+    box-shadow: var(--glow) !important;
+}
+.stTextInput label, .stTextArea label, .stSelectbox label {
+    color: var(--muted) !important;
+    font-size: 0.78rem !important;
+    font-weight: 600 !important;
+}
+.stButton > button {
+    width: 100% !important;
+    background: var(--bg3) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: var(--rs) !important;
+    color: var(--text) !important;
+    font-family: 'Sora', sans-serif !important;
+    font-size: 0.82rem !important;
+    font-weight: 600 !important;
+    padding: 0.55rem 0.8rem !important;
+    transition: all 0.18s !important;
+    letter-spacing: 0.01em;
+}
+.stButton > button:hover {
+    background: rgba(124,143,255,0.12) !important;
+    border-color: var(--accent) !important;
+    color: var(--accent) !important;
+    box-shadow: var(--glow) !important;
+    transform: translateY(-1px);
+}
+.stDownloadButton > button {
+    background: rgba(61,245,168,0.08) !important;
+    border: 1px solid rgba(61,245,168,0.3) !important;
+    color: var(--green) !important;
+}
+.stCodeBlock, pre, code {
+    background: var(--bg3) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: var(--rs) !important;
+    font-family: 'JetBrains Mono', monospace !important;
+    font-size: 0.83rem !important;
+    color: #b4c1ff !important;
+}
+.box-info  { background:rgba(124,143,255,0.07); border:1px solid rgba(124,143,255,0.25); border-radius:var(--rs); padding:0.7rem 1rem; font-size:0.83rem; color:var(--accent); margin:0.4rem 0; }
+.box-warn  { background:rgba(251,191,36,0.07);  border:1px solid rgba(251,191,36,0.25);  border-radius:var(--rs); padding:0.7rem 1rem; font-size:0.83rem; color:var(--gold);   margin:0.4rem 0; }
+.box-ok    { background:rgba(61,245,168,0.07);  border:1px solid rgba(61,245,168,0.25);  border-radius:var(--rs); padding:0.7rem 1rem; font-size:0.83rem; color:var(--green);  margin:0.4rem 0; }
+.box-err   { background:rgba(248,113,113,0.07); border:1px solid rgba(248,113,113,0.25); border-radius:var(--rs); padding:0.7rem 1rem; font-size:0.83rem; color:var(--red);    margin:0.4rem 0; }
+.card {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: var(--r);
+    padding: 1rem 1.1rem;
+    margin: 0.5rem 0;
+}
+.card-title { font-weight: 700; font-size: 0.9rem; color: var(--cyan); margin-bottom: 0.3rem; }
+.stTabs [data-baseweb="tab-list"] {
+    gap: 4px;
+    background: var(--bg2);
+    border-radius: var(--rs);
+    padding: 4px;
+    border: 1px solid var(--border);
+}
+.stTabs [data-baseweb="tab"] {
+    border-radius: 6px !important;
+    color: var(--muted) !important;
+    font-size: 0.8rem !important;
+    font-weight: 600 !important;
+    padding: 0.4rem 0.9rem !important;
+}
+.stTabs [aria-selected="true"] {
+    background: rgba(124,143,255,0.15) !important;
+    color: var(--accent) !important;
+}
+.chat-user { background: rgba(124,143,255,0.1); border:1px solid rgba(124,143,255,0.2); border-radius:var(--rs); padding:0.6rem 0.9rem; margin:0.3rem 0; font-size:0.87rem; }
+.chat-ai   { background: var(--bg2); border:1px solid var(--border); border-radius:var(--rs); padding:0.6rem 0.9rem; margin:0.3rem 0; font-size:0.87rem; }
+hr { border:none !important; border-top:1px solid var(--border) !important; margin:1.2rem 0 !important; }
+::-webkit-scrollbar { width:5px; }
+::-webkit-scrollbar-thumb { background:rgba(124,143,255,0.3); border-radius:3px; }
 </style>
 """, unsafe_allow_html=True)
 
-# ================= HERO =================
+# ─────────────────────────── SESSION STATE ──────────────────────────────────
+for key, default in [
+    ("chat_history",    []),
+    ("last_result",     ""),
+    ("last_meta",       {}),
+    ("ai_code",         ""),
+    ("ai_code_lang",    "Python"),
+]:
+    st.session_state.setdefault(key, default)
+
+# ─────────────────────────── HERO ───────────────────────────────────────────
 st.markdown("""
 <div class="hero">
-    <div class="badge">✦ Claude API + Groq &nbsp;·&nbsp; Direct PDF Reading</div>
+    <div class="badge">✦ Claude + Groq · Per-Branch PDF Library · Smart Subject Lookup</div>
     <div class="hero-title">AI Teaching Assistant</div>
-    <div class="hero-sub">Reads your syllabus PDFs directly — no preprocessing, no limits</div>
-    <div style="margin-top:1rem;">
-        <span class="pill">📄 Direct PDF Reading</span>
-        <span class="pill">🎓 Multi-Regulation</span>
-        <span class="pill">⚡ Groq Powered</span>
-        <span class="pill">💻 Code Runner</span>
+    <div class="hero-sub">Subject-code direct lookup · Syllabus Q&amp;A · Study tools · Multi-language Code Runner</div>
+    <div style="margin-top:0.9rem;">
+        <span class="pill">📄 Direct PDF Lookup</span>
+        <span class="pill">🎓 Branch-Aware</span>
+        <span class="pill">⚡ Groq Fast Answers</span>
+        <span class="pill">💻 Multi-Lang Runner</span>
+        <span class="pill">📝 Study Planner</span>
+        <span class="pill">🧮 Formula Sheets</span>
     </div>
 </div>
 """, unsafe_allow_html=True)
 
-# ================= SESSION =================
-st.session_state.setdefault("ai_code", "")
-st.session_state.setdefault("ai_code_lang", "Python")
-st.session_state.setdefault("syllabus_result", "")
-st.session_state.setdefault("syllabus_meta", {})
+# ═══════════════════════════════════════════════════════════════════════════
+#  PDF LIBRARY UTILITIES
+# ═══════════════════════════════════════════════════════════════════════════
 
-# ================= PDF FOLDER SCANNER =================
-def scan_pdf_folder(folder: str) -> dict:
-    mapping = {}
+def list_branches() -> list[str]:
+    if not os.path.isdir(PDF_ROOT):
+        return []
+    return sorted(
+        d for d in os.listdir(PDF_ROOT)
+        if os.path.isdir(os.path.join(PDF_ROOT, d))
+    )
+
+def list_subjects_in_branch(branch: str) -> list[str]:
+    folder = os.path.join(PDF_ROOT, branch)
     if not os.path.isdir(folder):
-        return mapping
+        return []
+    return sorted(
+        os.path.splitext(f)[0].upper()
+        for f in os.listdir(folder)
+        if f.lower().endswith(".pdf")
+    )
+
+def find_subject_pdf(branch: str, subject_code: str) -> str | None:
+    folder = os.path.join(PDF_ROOT, branch.upper())
+    if not os.path.isdir(folder):
+        for d in os.listdir(PDF_ROOT) if os.path.isdir(PDF_ROOT) else []:
+            if d.upper() == branch.upper():
+                folder = os.path.join(PDF_ROOT, d)
+                break
+        else:
+            return None
+    code = subject_code.strip().upper()
     for fname in os.listdir(folder):
-        if fname.lower().endswith(".pdf"):
-            key = fname.lower().replace("syllabus", "").replace(".pdf", "").strip()
-            mapping[key] = fname
-    return mapping
+        stem = os.path.splitext(fname)[0].upper()
+        if stem == code and fname.lower().endswith(".pdf"):
+            return os.path.join(folder, fname)
+    return None
 
-PDF_MAP = scan_pdf_folder(PDF_FOLDER)
+@st.cache_data(show_spinner=False)
+def get_pdf_base64(path: str) -> str:
+    with open(path, "rb") as f:
+        return base64.standard_b64encode(f.read()).decode("utf-8")
 
-def get_options():
-    options = []
-    for key in sorted(PDF_MAP.keys()):
-        reg    = key[:3].upper()
-        branch = key[3:].upper()
-        options.append(f"{reg} {branch}")
-    return options if options else ["⚠️ No PDFs found — add to syllabus_pdfs/"]
-
-def find_pdf(reg_branch: str) -> str:
-    key   = reg_branch.lower().replace(" ", "")
-    fname = PDF_MAP.get(key)
-    return os.path.join(PDF_FOLDER, fname) if fname else None
-
-# ================= PDF CACHE =================
-def get_cached_pdf_base64(path: str) -> str:
-    mtime     = str(os.path.getmtime(path))
-    cache_key = f"__pdf_cache__{path}__{mtime}"
-    if cache_key not in st.session_state:
-        size_mb = os.path.getsize(path) / (1024 * 1024)
-        if size_mb > 5:
-            st.toast(f"📄 Loading {size_mb:.1f} MB PDF into memory… (cached after this)", icon="⏳")
-        with open(path, "rb") as f:
-            st.session_state[cache_key] = base64.standard_b64encode(f.read()).decode("utf-8")
-    return st.session_state[cache_key]
-
-# ================= SMART PDF SPLITTER =================
-def find_subject_page_range(path: str, subject_code: str, window: int = 15) -> tuple:
-    try:
-        reader = PdfReader(path)
-        total  = len(reader.pages)
-        code   = subject_code.upper().strip()
-        for i, page in enumerate(reader.pages):
-            text = page.extract_text() or ""
-            if code in text.upper():
-                start = max(0, i - 1)
-                end   = min(total - 1, i + window)
-                return start, end
-        return 0, min(99, total - 1)
-    except Exception:
-        return 0, 99
-
-def make_pdf_content_block(path: str, subject_code: str = "", max_pages: int = 90) -> dict:
+def pdf_content_block(path: str, max_pages: int = 80) -> dict:
     reader = PdfReader(path)
     total  = len(reader.pages)
-
     if total <= max_pages:
         return {
             "type": "document",
             "source": {"type": "base64", "media_type": "application/pdf",
-                       "data": get_cached_pdf_base64(path)}
+                       "data": get_pdf_base64(path)}
         }
-
-    if subject_code.strip():
-        start, end = find_subject_page_range(path, subject_code, window=20)
-        label = f"pages {start+1}–{end+1}"
-    else:
-        start, end = 0, max_pages - 1
-        label = f"first {max_pages} pages"
-
-    st.toast(f"Large PDF ({total} pages) — sending {label} to Claude.", icon="✂️")
-
+    st.toast(f"Large PDF ({total} pages) — sending first {max_pages} pages.", icon="✂️")
     writer = PdfWriter()
-    for i in range(start, end + 1):
+    for i in range(min(max_pages, total)):
         writer.add_page(reader.pages[i])
-
-    buf = io.BytesIO()
-    writer.write(buf)
-    data = base64.standard_b64encode(buf.getvalue()).decode("utf-8")
-
+    buf = io.BytesIO(); writer.write(buf)
     return {
         "type": "document",
-        "source": {"type": "base64", "media_type": "application/pdf", "data": data}
+        "source": {"type": "base64", "media_type": "application/pdf",
+                   "data": base64.standard_b64encode(buf.getvalue()).decode("utf-8")}
     }
 
-# ================= CLAUDE CALLER =================
-CLAUDE_MODELS = ["claude-haiku-4-5", "claude-sonnet-4-5"]
+def get_pdf_page_count(path: str) -> int:
+    try:
+        return len(PdfReader(path).pages)
+    except Exception:
+        return 0
 
-def _claude_call(messages: list, max_tokens: int = 4096, retries: int = 3) -> str:
-    last_err = None
-    for model in CLAUDE_MODELS:
-        for attempt in range(retries):
-            try:
-                response = claude_client.messages.create(
-                    model=model, max_tokens=max_tokens, messages=messages)
-                return response.content[0].text
-            except Exception as e:
-                err_str = str(e)
-                if "rate_limit_error" in err_str or "429" in err_str:
-                    wait = 20 * (attempt + 1)
-                    st.toast(f"⏳ Rate limit on {model} — waiting {wait}s…", icon="⏳")
-                    time.sleep(wait)
-                    last_err = e
-                else:
-                    raise
-        st.toast(f"⚠️ Switching from {model} to next model…", icon="🔄")
-    raise RuntimeError(f"All Claude models rate-limited. Last error: {last_err}")
+# ═══════════════════════════════════════════════════════════════════════════
+#  BRANCH PROFILE
+# ═══════════════════════════════════════════════════════════════════════════
 
-# ================= BRANCH PROFILE =================
-def _get_branch_profile(reg_branch: str) -> dict:
-    branch = reg_branch.upper()
-    CORE_BRANCHES    = ["CSE","CS","IT","AIML","AIDS","AI","DS","ML","ECE","EEE","EE","CSBS","IOT","CYBER","CSD"]
-    RELATED_BRANCHES = ["MECH","CIVIL","CHEM","AERO","AUTO"]
+BRANCH_PROFILES = {
+    "CORE": {
+        "keywords": ["CSE","CS","IT","AIML","AIDS","AI","DS","ML","ECE","EEE","IOT","CYBER","CSD","CSBS"],
+        "label": "Full technical depth",
+        "emoji": "🔬",
+        "color": "#3df5a8",
+        "instruction": (
+            "Give a COMPLETE, DETAILED, TECHNICAL answer covering all relevant concepts, "
+            "algorithms, formulas, sub-topics, and examples as described in the syllabus. "
+            "Use proper technical terminology, clear headings, and bullet points."
+        ),
+    },
+    "RELATED": {
+        "keywords": ["MECH","CIVIL","CHEM","AERO","AUTO","AGRI","BIOTECH","MARINE"],
+        "label": "Simplified — applied focus",
+        "emoji": "📘",
+        "color": "#fbbf24",
+        "instruction": (
+            "Give a CLEAR, CONCISE answer in plain language. Avoid heavy jargon. "
+            "Start with a simple definition, then give brief context and a real-world analogy."
+        ),
+    },
+}
 
-    for b in CORE_BRANCHES:
-        if b in branch:
-            return {
-                "level": "CORE",
-                "instruction": (
-                    "This student is from a core CS/IT/AI/ECE branch. "
-                    "Give a COMPLETE, DETAILED, TECHNICAL answer. "
-                    "Cover all relevant concepts, sub-topics, algorithms, formulas, and examples "
-                    "exactly as described in the syllabus. Use proper technical terminology. "
-                    "Structure your answer with clear headings and sub-points. Be thorough — "
-                    "the student needs this for exams and lab work."
-                )
-            }
-    for b in RELATED_BRANCHES:
-        if b in branch:
-            return {
-                "level": "RELATED",
-                "instruction": (
-                    "This student is from a non-CS branch (Mechanical, Civil, etc.). "
-                    "Give a SIMPLE, CLEAR answer in plain language. Avoid heavy jargon. "
-                    "Use a short definition, brief context, and a real-world analogy if helpful. "
-                    "If the topic is not very relevant to their branch, politely note it and "
-                    "give a brief general explanation."
-                )
-            }
+def get_branch_profile(branch: str) -> dict:
+    b = branch.upper()
+    for level, data in BRANCH_PROFILES.items():
+        if any(kw in b for kw in data["keywords"]):
+            return {"level": level, **data}
     return {
         "level": "OTHER",
-        "instruction": (
-            "Give a clear, concise answer. Include a brief definition and the key points "
-            "from the syllabus. Avoid unnecessary jargon."
-        )
+        "label": "General",
+        "emoji": "📖",
+        "color": "#7c8fff",
+        "instruction": "Give a clear, concise answer with a definition and key points.",
     }
 
-# =================================================================================
-# ACTION 1 — VIEW FULL SYLLABUS   (Claude + PDF, needs subject_code)
-# Returns the complete syllabus for the given subject exactly as in the PDF.
-# =================================================================================
-def view_syllabus_from_pdf(pdf_path: str, subject_code: str, semester: str) -> str:
-    messages = [{
-        "role": "user",
-        "content": [
-            make_pdf_content_block(pdf_path, subject_code, max_pages=60),
-            {
-                "type": "text",
-                "text": f"""Read this syllabus PDF carefully.
+# ═══════════════════════════════════════════════════════════════════════════
+#  CLAUDE WRAPPER
+# ═══════════════════════════════════════════════════════════════════════════
 
-Find the subject with code: **{subject_code}**
-Semester: {semester}
+def claude_call(messages: list, max_tokens: int = 4096, retries: int = 3) -> str:
+    for attempt in range(retries):
+        try:
+            resp = claude_client.messages.create(
+                model=CLAUDE_MODEL,
+                max_tokens=max_tokens,
+                messages=messages,
+            )
+            return resp.content[0].text
+        except Exception as e:
+            err = str(e)
+            if "rate_limit" in err or "529" in err or "429" in err:
+                wait = 20 * (attempt + 1)
+                st.toast(f"Rate limit — waiting {wait}s…", icon="⏳")
+                time.sleep(wait)
+            else:
+                raise
+    raise RuntimeError("Claude rate-limited after all retries.")
 
-Return the COMPLETE syllabus for that subject exactly as it appears:
-- Subject name and code
-- L T P C credits
-- Course Objectives (all points)
-- All Units with complete topic details
-- Course Outcomes (all)
-- Text books / Reference books
+# ═══════════════════════════════════════════════════════════════════════════
+#  GROQ WRAPPER
+# ═══════════════════════════════════════════════════════════════════════════
 
-If not found, respond: "Subject code {subject_code} was not found in this PDF."
-Do not summarize. Return full content."""
-            }
-        ]
-    }]
-    return _claude_call(messages, max_tokens=8192)
-
-# =================================================================================
-# ACTION 2 — ASK ABOUT SYLLABUS   (Claude + PDF, needs subject_code)
-# Answers the student's question using the PDF, depth depends on branch.
-# Does NOT require the syllabus to be loaded first — reads PDF directly.
-# =================================================================================
-def ask_syllabus_from_pdf(pdf_path: str, subject_code: str, semester: str,
-                          question: str, reg_branch: str) -> str:
-    profile = _get_branch_profile(reg_branch)
-
-    prompt = f"""You are an AI Teaching Assistant for engineering students.
-
-STUDENT PROFILE:
-- Branch      : {reg_branch}
-- Subject Code: {subject_code}
-- Semester    : {semester}
-- Level       : {profile["level"]}
-
-ANSWERING INSTRUCTION:
-{profile["instruction"]}
-
-RULES:
-- Answer strictly based on the syllabus PDF provided.
-- If the topic is in the syllabus, explain it exactly as covered there.
-- If the topic is NOT in the syllabus, clearly state:
-  "This topic is not covered in the {subject_code} syllabus."
-  Then give a brief general explanation appropriate for this student's branch level.
-- Never fabricate syllabus content.
-- Format clearly with headings and bullet points where needed.
-
-Student Question: {question}
-
-Answer now:"""
-
-    messages = [{
-        "role": "user",
-        "content": [
-            make_pdf_content_block(pdf_path, subject_code, max_pages=30),
-            {"type": "text", "text": prompt}
-        ]
-    }]
-    return _claude_call(messages, max_tokens=3000)
-
-# =================================================================================
-# ACTION 3 — QUICK ANSWER   (Groq only)
-# No PDF, no subject code, no branch — just answers the question like ChatGPT.
-# =================================================================================
-def quick_answer_groq(question: str) -> str:
+def groq_call(system: str, user: str, max_tokens: int = 2000, temp: float = 0.7) -> str:
     r = groq_client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You are a helpful AI assistant for engineering students. "
-                    "Answer any question clearly and concisely. "
-                    "Explain concepts, solve problems, give examples. "
-                    "Format with headings and bullet points where useful. "
-                    "Be direct — do not ask for clarification, just answer."
-                )
-            },
-            {"role": "user", "content": question}
-        ],
-        max_tokens=1500,
-        temperature=0.7,
+        model=GROQ_MODEL,
+        messages=[{"role": "system", "content": system},
+                  {"role": "user",   "content": user}],
+        max_tokens=max_tokens,
+        temperature=temp,
     )
     return r.choices[0].message.content
 
-# =================================================================================
-# ACTION 4 — GENERATE CODE   (Groq only)
-# =================================================================================
-def generate_code_groq(question: str, lang: str) -> str:
-    r = groq_client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    f"You are an expert {lang} programmer. "
-                    f"Generate only complete, executable {lang} code. "
-                    "No markdown fences. No explanation before or after. Raw code only."
-                )
-            },
-            {"role": "user", "content": question}
-        ],
-        max_tokens=2000,
-        temperature=0.2,
-    )
-    lines = [l for l in r.choices[0].message.content.splitlines()
-             if not l.strip().startswith("```")]
-    return "\n".join(lines).strip()
+# ═══════════════════════════════════════════════════════════════════════════
+#  ACTION 1 — VIEW FULL SYLLABUS
+# ═══════════════════════════════════════════════════════════════════════════
 
-# =================================================================================
-# IMAGES — DuckDuckGo diagram search
-# =================================================================================
-def show_diagrams(query: str):
-    images = []
+def action_view_syllabus(pdf_path: str, subject_code: str, semester: str) -> str:
+    block = pdf_content_block(pdf_path, max_pages=80)
+    return claude_call([{
+        "role": "user",
+        "content": [
+            block,
+            {"type": "text", "text": f"""Read this syllabus PDF carefully.
+
+Extract the COMPLETE syllabus for subject code: **{subject_code}**
+Semester: {semester}
+
+Return EXACTLY as it appears:
+- Subject name and code
+- Credits (L T P C)
+- Course Objectives (all points)
+- All Units with full topic details
+- Course Outcomes (all)
+- Textbooks & Reference books
+
+If not found: "Subject {subject_code} was not found in this PDF."
+Do NOT summarize. Return full content."""}
+        ]
+    }], max_tokens=8192)
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  ACTION 2 — ASK ABOUT SYLLABUS
+# ═══════════════════════════════════════════════════════════════════════════
+
+def action_ask_syllabus(pdf_path: str, subject_code: str, semester: str,
+                        question: str, branch: str) -> str:
+    profile = get_branch_profile(branch)
+    prompt  = f"""You are an AI Teaching Assistant for engineering students.
+
+STUDENT: Branch={branch} | Subject={subject_code} | Semester={semester} | Level={profile['level']}
+
+ANSWERING STYLE:
+{profile['instruction']}
+
+RULES:
+- Answer strictly from the syllabus PDF.
+- If topic IS in syllabus: explain it fully as per syllabus.
+- If topic is NOT in syllabus: state "This topic is not in the {subject_code} syllabus."
+  Then give a brief general explanation appropriate for this student's level.
+- Never fabricate syllabus content.
+- Use headings and bullet points.
+
+Question: {question}"""
+
+    block = pdf_content_block(pdf_path, max_pages=60)
+    return claude_call([{
+        "role": "user",
+        "content": [block, {"type": "text", "text": prompt}]
+    }], max_tokens=3500)
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  ACTION 3 — TOPIC SUMMARY CARD
+# ═══════════════════════════════════════════════════════════════════════════
+
+def action_topic_summary(pdf_path: str, subject_code: str, topic: str, branch: str) -> str:
+    profile = get_branch_profile(branch)
+    prompt  = f"""From the syllabus PDF for subject {subject_code}, create a structured STUDY CARD for the topic:
+
+**Topic:** {topic}
+**Student level:** {profile['level']} ({branch})
+
+Format the card as:
+## {topic}
+### Definition
+[1-2 sentence definition]
+
+### Key Concepts
+[bullet list of 4-6 core ideas]
+
+### Important Points for Exam
+[bullet list of 3-5 exam-relevant points]
+
+### Example / Application
+[brief example or real-world use]
+
+{profile['instruction']}"""
+
+    block = pdf_content_block(pdf_path, max_pages=60)
+    return claude_call([{
+        "role": "user",
+        "content": [block, {"type": "text", "text": prompt}]
+    }], max_tokens=2000)
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  ACTION 4 — FORMULA SHEET
+# ═══════════════════════════════════════════════════════════════════════════
+
+def action_formula_sheet(pdf_path: str, subject_code: str, unit: str) -> str:
+    prompt = f"""From the syllabus PDF for subject {subject_code}, extract ALL formulas, equations,
+and key definitions mentioned in {unit if unit != 'All Units' else 'all units'}.
+
+Format as a clean FORMULA SHEET:
+## Formula Sheet - {subject_code} {f'({unit})' if unit != 'All Units' else ''}
+
+For each unit/section:
+### [Unit Name]
+| Formula/Term | Description |
+|---|---|
+| [formula] | [what it means] |
+
+Include: mathematical formulas, algorithms steps, definitions, key theorems.
+Do not include prose - only formulas and definitions."""
+
+    block = pdf_content_block(pdf_path, max_pages=80)
+    return claude_call([{
+        "role": "user",
+        "content": [block, {"type": "text", "text": prompt}]
+    }], max_tokens=3000)
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  ACTION 5 — STUDY PLANNER
+# ═══════════════════════════════════════════════════════════════════════════
+
+def action_study_planner(subject: str, days: int, units: str, exam_type: str) -> str:
+    system = (
+        "You are an expert academic study planner for engineering students. "
+        "Create realistic, hour-by-hour study plans. Be specific and practical."
+    )
+    user = f"""Create a {days}-day study plan for:
+Subject: {subject}
+Units/Topics: {units}
+Exam type: {exam_type}
+
+Format:
+## {days}-Day Study Plan - {subject}
+
+### Day 1: [focus area]
+- Morning (2hr): [specific tasks]
+- Afternoon (2hr): [specific tasks]
+- Evening (1hr): [revision]
+- Quick Revision: [3 key points to remember]
+
+...repeat for each day...
+
+### Final Day: Revision Strategy
+### Exam Day Tips
+
+Keep plans realistic. Include breaks. Focus on high-weightage topics first."""
+
+    return groq_call(system, user, max_tokens=2500, temp=0.5)
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  ACTION 6 — PREVIOUS YEAR Q&A
+# ═══════════════════════════════════════════════════════════════════════════
+
+def action_pyq_answer(subject: str, question: str, marks: int, branch: str) -> str:
+    profile = get_branch_profile(branch)
+    system  = (
+        f"You are an expert engineering examiner and teacher for {branch} students. "
+        "Answer previous year exam questions with exactly the right depth for the marks allocated. "
+        f"{profile['instruction']}"
+    )
+    user = f"""Answer this previous year exam question:
+
+Subject: {subject}
+Marks: {marks}
+Branch: {branch}
+
+Question: {question}
+
+Write a model answer appropriate for {marks} marks.
+- 2 marks: definition + 1 example
+- 5 marks: detailed explanation with points
+- 10 marks: full essay with diagrams description, examples, advantages/disadvantages
+Format with headings and bullet points."""
+
+    return groq_call(system, user, max_tokens=2500, temp=0.4)
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  ACTION 7 — QUICK ANSWER
+# ═══════════════════════════════════════════════════════════════════════════
+
+def action_quick_answer(question: str, branch: str) -> str:
+    profile = get_branch_profile(branch)
+    system  = (
+        f"You are a helpful AI teacher for {branch} engineering students. "
+        f"{profile['instruction']} "
+        "Answer clearly with examples. Use headings and bullet points."
+    )
+    return groq_call(system, question, max_tokens=1800, temp=0.6)
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  ACTION 8 — GENERATE CODE
+# ═══════════════════════════════════════════════════════════════════════════
+
+def action_generate_code(problem: str, lang: str) -> str:
+    system = (
+        f"You are an expert {lang} programmer for engineering labs. "
+        f"Write complete, executable {lang} code only. "
+        "No markdown fences. No explanations outside comments. Raw code only."
+    )
+    code = groq_call(system, problem, max_tokens=2500, temp=0.2)
+    code = re.sub(r"^```[\w]*\n?", "", code.strip())
+    code = re.sub(r"```$", "", code.strip())
+    return code.strip()
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  ACTION 8b — EXECUTE CODE VIA GROQ API (for non-Python languages)
+#  Groq simulates execution: traces through the code step-by-step and
+#  returns what the actual output would be, given the stdin input.
+# ═══════════════════════════════════════════════════════════════════════════
+
+def action_execute_code_via_ai(code: str, lang: str, stdin_input: str) -> dict:
+    """
+    Uses Groq to simulate/execute code and return:
+      - stdout output
+      - any errors
+      - step-by-step trace (optional)
+    Returns dict: {"output": str, "error": str, "success": bool}
+    """
+    system = """You are a precise code execution engine / interpreter simulator.
+Your job is to trace through the given code exactly as a real compiler/interpreter would,
+and return ONLY the program's output — nothing else.
+
+Rules:
+1. Read the code carefully line by line.
+2. Simulate variable states, loops, conditionals, function calls exactly.
+3. Use the provided stdin input when the program reads from stdin.
+4. Return ONLY what would appear on stdout when the program runs.
+5. If there is a compile error or runtime error, return: ERROR: <description>
+6. Do NOT add explanations, commentary, or extra text.
+7. Preserve exact formatting of output (newlines, spaces).
+"""
+    user = f"""Language: {lang}
+Stdin Input: {stdin_input if stdin_input.strip() else "(none)"}
+
+Code:
+{code}
+
+Execute this code and return ONLY the stdout output (or ERROR: message if it fails)."""
+
     try:
-        with DDGS() as ddgs:
-            results = ddgs.images(
-                keywords=query + " diagram",
-                region="wt-wt",
-                safesearch="off",
-                max_results=9,
-            )
-            for r in results:
-                url = r.get("image", "")
-                if url:
-                    images.append(url)
+        result = groq_call(system, user, max_tokens=1000, temp=0.0)
+        result = result.strip()
+        if result.upper().startswith("ERROR:"):
+            return {"output": "", "error": result, "success": False}
+        return {"output": result, "error": "", "success": True}
     except Exception as e:
-        st.error(f"❌ Image search failed: {e}")
-        return
+        return {"output": "", "error": str(e), "success": False}
 
-    if not images:
-        st.warning("No diagrams found. Try a more specific topic.")
-        return
+# ═══════════════════════════════════════════════════════════════════════════
+#  ACTION 9 — EXAM MODE QUIZ
+# ═══════════════════════════════════════════════════════════════════════════
 
-    st.markdown(
-        f'<div class="info-box">🔍 Showing diagrams for: <strong>{query}</strong></div>',
-        unsafe_allow_html=True
+def action_exam_quiz(subject: str, topic: str, num_q: int, q_type: str) -> str:
+    system = (
+        "You are an expert exam question setter for engineering university exams. "
+        "Create realistic exam questions exactly as they appear in university papers."
     )
+    user = f"""Create {num_q} {q_type} questions for:
+Subject: {subject}
+Topic: {topic}
 
-    cols  = st.columns(3)
-    shown = 0
-    for url in images:
-        if shown >= 6:
-            break
-        try:
-            cols[shown % 3].image(url, use_column_width=True)
-            shown += 1
-        except Exception:
-            continue  # skip broken URLs silently
+Format:
+## Practice Questions - {topic}
+### {q_type} Questions
 
-    if shown == 0:
-        st.warning("Images found but could not be loaded. Try a different search term.")
+Q1. [Question] ({2 if q_type=='Short Answer' else 10} marks)
+**Answer:** [Model answer]
 
-# =================================================================================
-# PDF EXPORT BUILDER
-# =================================================================================
-def build_syllabus_pdf(result: str, subject_code: str, reg_branch: str, semester: str) -> bytes:
-    LEFT = RIGHT = 15
-    TOP  = 15
-    CW   = 210 - LEFT - RIGHT
+Q2. ...
 
-    def to_latin1(text: str) -> str:
-        table = {
-            "\u2022":"-", "\u00b7":"-", "\u25cf":"-", "\u25a0":"-",
-            "\u2013":"-", "\u2014":"-", "\u2015":"-",
-            "\u2018":"'", "\u2019":"'",
-            "\u201c":'"', "\u201d":'"',
-            "\u2026":"...",
-            "\u2192":"->", "\u2190":"<-", "\u2194":"<->",
-            "\u00d7":"x",  "\u00f7":"/",
-            "\u00b0":" deg", "\u00b1":"+/-",
-            "\u2264":"<=", "\u2265":">=", "\u2260":"!=",
-            "\u221a":"sqrt", "\u03c0":"pi",
-            "\u03b1":"alpha", "\u03b2":"beta",  "\u03b3":"gamma",
-            "\u03b4":"delta", "\u03bc":"mu",    "\u03c3":"sigma",
-            "\u03c9":"omega", "\u03bb":"lambda",
-            "\u00e9":"e", "\u00e8":"e", "\u00ea":"e",
-            "\u00e0":"a", "\u00e2":"a", "\u00f4":"o",
-            "\u00fc":"u", "\u00e4":"a", "\u00f6":"o",
-        }
-        for ch, rep in table.items():
-            text = text.replace(ch, rep)
-        text = unicodedata.normalize("NFKD", text)
-        return text.encode("latin-1", "ignore").decode("latin-1")
+Make questions exam-realistic. Include answers."""
 
-    def ct(text): return to_latin1(str(text))
+    return groq_call(system, user, max_tokens=2500, temp=0.5)
 
+# ═══════════════════════════════════════════════════════════════════════════
+#  PDF EXPORT  (FIXED — full Unicode-safe character mapping)
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Comprehensive Unicode → ASCII/Latin-1 safe replacement table
+_UNICODE_TABLE = {
+    # Bullets & list markers
+    "\u2022": "-",   # •
+    "\u00b7": "-",   # middle dot
+    "\u25cf": "-",   # black circle
+    "\u25cb": "o",   # white circle
+    "\u25a0": "-",   # black square
+    "\u25a1": "-",   # white square
+    "\u2023": "-",   # triangular bullet
+    "\u2043": "-",   # hyphen bullet
+
+    # Dashes & hyphens
+    "\u2013": "-",   # en dash
+    "\u2014": "--",  # em dash
+    "\u2012": "-",   # figure dash
+    "\u2015": "-",   # horizontal bar
+
+    # Quotes
+    "\u2018": "'",   # left single quote
+    "\u2019": "'",   # right single quote
+    "\u201a": ",",   # low single quote
+    "\u201c": '"',   # left double quote
+    "\u201d": '"',   # right double quote
+    "\u201e": '"',   # low double quote
+
+    # Ellipsis & misc punctuation
+    "\u2026": "...", # ellipsis
+    "\u2027": ".",   # hyphenation point
+    "\u00ab": "<<",  # left guillemet
+    "\u00bb": ">>",  # right guillemet
+
+    # Arrows
+    "\u2192": "->",  # right arrow
+    "\u2190": "<-",  # left arrow
+    "\u2194": "<->", # left-right arrow
+    "\u21d2": "=>",  # double right arrow
+    "\u2191": "^",   # up arrow
+    "\u2193": "v",   # down arrow
+
+    # Math operators
+    "\u00d7": "x",   # multiplication sign
+    "\u00f7": "/",   # division sign
+    "\u00b0": " deg",# degree sign
+    "\u00b1": "+/-", # plus-minus
+    "\u2264": "<=",  # less than or equal
+    "\u2265": ">=",  # greater than or equal
+    "\u2260": "!=",  # not equal
+    "\u2248": "~=",  # approximately equal
+    "\u221e": "inf", # infinity
+    "\u221a": "sqrt",# square root
+    "\u2211": "sum", # summation
+    "\u220f": "prod",# product
+    "\u222b": "int", # integral
+    "\u2202": "d",   # partial derivative
+    "\u2207": "del", # nabla
+    "\u2208": "in",  # element of
+    "\u2209": "not in",
+    "\u2229": "^",   # intersection
+    "\u222a": "v",   # union
+    "\u2282": "C",   # subset of
+    "\u2283": "D",   # superset of
+
+    # Greek letters (common in engineering)
+    "\u03b1": "alpha", "\u03b2": "beta",  "\u03b3": "gamma",
+    "\u03b4": "delta", "\u03b5": "eps",   "\u03b6": "zeta",
+    "\u03b7": "eta",   "\u03b8": "theta", "\u03b9": "iota",
+    "\u03ba": "kappa", "\u03bb": "lambda","\u03bc": "mu",
+    "\u03bd": "nu",    "\u03be": "xi",    "\u03c0": "pi",
+    "\u03c1": "rho",   "\u03c3": "sigma", "\u03c4": "tau",
+    "\u03c5": "ups",   "\u03c6": "phi",   "\u03c7": "chi",
+    "\u03c8": "psi",   "\u03c9": "omega",
+    "\u0391": "Alpha", "\u0392": "Beta",  "\u0393": "Gamma",
+    "\u0394": "Delta", "\u0398": "Theta", "\u039b": "Lambda",
+    "\u03a0": "Pi",    "\u03a3": "Sigma", "\u03a6": "Phi",
+    "\u03a9": "Omega",
+
+    # Superscripts / subscripts
+    "\u00b2": "^2",  "\u00b3": "^3",
+    "\u00b9": "^1",  "\u2070": "^0",
+    "\u2074": "^4",  "\u2075": "^5",
+    "\u2076": "^6",  "\u2077": "^7",
+    "\u2078": "^8",  "\u2079": "^9",
+
+    # Currency & misc
+    "\u20ac": "EUR", "\u00a3": "GBP", "\u00a5": "JPY",
+    "\u00a9": "(c)", "\u00ae": "(r)", "\u2122": "(tm)",
+    "\u00a0": " ",   # non-breaking space
+    "\u00ad": "-",   # soft hyphen
+    "\u200b": "",    # zero-width space
+
+    # Box drawing (sometimes in tables)
+    "\u2500": "-", "\u2502": "|", "\u250c": "+",
+    "\u2510": "+", "\u2514": "+", "\u2518": "+",
+    "\u251c": "+", "\u2524": "+", "\u252c": "+",
+    "\u2534": "+", "\u253c": "+",
+
+    # Checkmarks / X marks
+    "\u2713": "[OK]", "\u2714": "[OK]",
+    "\u2717": "[X]",  "\u2718": "[X]",
+    "\u2705": "[OK]", "\u274c": "[X]",
+
+    # Stars / ratings
+    "\u2605": "*",  "\u2606": "*",
+    "\u2665": "<3", "\u2660": "S",
+
+    # Fraction slash
+    "\u2044": "/",
+}
+
+def safe_latin1(text: str) -> str:
+    """
+    Convert any Unicode string to a Latin-1-safe string for fpdf2/Helvetica.
+    Steps:
+      1. Apply explicit character mapping table
+      2. NFKD normalize (decomposes accented chars)
+      3. Encode to latin-1, replacing anything remaining with '?'
+    """
+    if not text:
+        return ""
+    # Step 1: apply our mapping table
+    for ch, rep in _UNICODE_TABLE.items():
+        text = text.replace(ch, rep)
+    # Step 2: NFKD normalization (e.g. é -> e + combining accent)
+    text = unicodedata.normalize("NFKD", text)
+    # Step 3: encode to latin-1, drop unmappable chars gracefully
+    return text.encode("latin-1", "replace").decode("latin-1")
+
+
+def build_pdf(result: str, title: str, subtitle: str, meta: str) -> bytes:
+    """Build a styled PDF from markdown-like text. Fully Unicode-safe."""
+    L = R = 15; T = 15; CW = 210 - L - R
     pdf = FPDF(orientation="P", unit="mm", format="A4")
-    pdf.set_margins(LEFT, TOP, RIGHT)
+    pdf.set_margins(L, T, R)
     pdf.set_auto_page_break(auto=True, margin=18)
     pdf.add_page()
 
-    pdf.set_fill_color(79, 99, 231)
-    pdf.rect(0, 0, 210, 28, style="F")
-    pdf.set_text_color(255, 255, 255)
-    pdf.set_font("Helvetica", "B", 14)
-    pdf.set_xy(LEFT, 7)
-    pdf.cell(0, 8, ct(f"Syllabus | {subject_code.upper()}"), ln=True)
-    pdf.set_font("Helvetica", "", 10)
-    pdf.set_xy(LEFT, 17)
-    pdf.cell(0, 7, ct(f"{reg_branch}   |   {semester}"), ln=True)
+    # ── Header bar ──
+    pdf.set_fill_color(30, 35, 65)
+    pdf.rect(0, 0, 210, 30, style="F")
+    pdf.set_text_color(230, 235, 255)
+    pdf.set_font("Helvetica", "B", 15)
+    pdf.set_xy(L, 8)
+    pdf.cell(CW, 8, safe_latin1(title), new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 9)
+    pdf.set_xy(L, 18)
+    pdf.cell(CW, 7, safe_latin1(f"{subtitle}   |   {meta}"), new_x="LMARGIN", new_y="NEXT")
+
     pdf.set_text_color(26, 29, 46)
-    pdf.set_xy(LEFT, 34)
-    right_edge = LEFT + CW
+    pdf.set_xy(L, 36)
+    right_edge = L + CW
 
     for raw_line in result.splitlines():
-        line     = to_latin1(raw_line)
-        stripped = line.strip()
-
-        if not stripped:
-            pdf.ln(2); continue
-        if stripped in ("**", "__"):
+        line = safe_latin1(raw_line)
+        s = line.strip()
+        if not s:
+            pdf.ln(2)
             continue
 
-        if stripped.startswith("# ") and not stripped.startswith("## "):
-            content = stripped[2:].strip()
-            if not content: continue
-            pdf.set_font("Helvetica","B",13); pdf.set_fill_color(235,238,255); pdf.set_text_color(26,29,46)
-            pdf.multi_cell(CW,9,content,fill=True); pdf.ln(2); pdf.set_font("Helvetica","",10)
+        # H1
+        if s.startswith("# ") and not s.startswith("## "):
+            c = s[2:].strip()
+            if not c:
+                continue
+            pdf.set_font("Helvetica", "B", 13)
+            pdf.set_fill_color(220, 224, 255)
+            pdf.set_text_color(30, 35, 65)
+            pdf.multi_cell(CW, 9, c, fill=True)
+            pdf.ln(2)
 
-        elif stripped.startswith("## ") and not stripped.startswith("### "):
-            content = stripped[3:].strip()
-            if not content: continue
-            pdf.set_font("Helvetica","B",12); pdf.set_text_color(79,99,231)
-            pdf.multi_cell(CW,8,content)
-            y=pdf.get_y(); pdf.set_draw_color(79,99,231); pdf.set_line_width(0.4)
-            pdf.line(LEFT,y,right_edge,y); pdf.ln(4)
-            pdf.set_text_color(26,29,46); pdf.set_font("Helvetica","",10)
+        # H2
+        elif s.startswith("## ") and not s.startswith("### "):
+            c = s[3:].strip()
+            if not c:
+                continue
+            pdf.set_font("Helvetica", "B", 12)
+            pdf.set_text_color(79, 99, 200)
+            pdf.multi_cell(CW, 8, c)
+            y = pdf.get_y()
+            pdf.set_draw_color(79, 99, 200)
+            pdf.set_line_width(0.4)
+            pdf.line(L, y, right_edge, y)
+            pdf.ln(4)
+            pdf.set_text_color(26, 29, 46)
+            pdf.set_font("Helvetica", "", 10)
 
-        elif stripped.startswith("### "):
-            content = stripped[4:].strip()
-            if not content: continue
-            pdf.set_font("Helvetica","B",11); pdf.set_text_color(26,29,46)
-            pdf.multi_cell(CW,7,content); pdf.ln(1); pdf.set_font("Helvetica","",10)
+        # H3
+        elif s.startswith("### "):
+            c = s[4:].strip()
+            if not c:
+                continue
+            pdf.set_font("Helvetica", "B", 11)
+            pdf.set_text_color(26, 29, 46)
+            pdf.multi_cell(CW, 7, c)
+            pdf.ln(1)
+            pdf.set_font("Helvetica", "", 10)
 
-        elif stripped.startswith("#### "):
-            content = stripped[5:].strip()
-            if not content: continue
-            pdf.set_font("Helvetica","BI",10); pdf.set_text_color(26,29,46)
-            pdf.multi_cell(CW,6,content); pdf.set_font("Helvetica","",10)
+        # Bullet list
+        elif s.startswith("- ") or s.startswith("* "):
+            ind = max(0, (len(raw_line) - len(raw_line.lstrip())) // 2)
+            c = s[2:].strip()
+            if not c:
+                continue
+            pdf.set_font("Helvetica", "", 10)
+            pdf.set_text_color(26, 29, 46)
+            pdf.set_x(L + ind * 4)
+            pdf.multi_cell(CW - ind * 4, 6, "- " + c)
 
-        elif (stripped.startswith("**") and stripped.endswith("**") and len(stripped)>4) or \
-             (stripped.startswith("__") and stripped.endswith("__") and len(stripped)>4):
-            content = stripped[2:-2].strip()
-            if not content: continue
-            pdf.set_font("Helvetica","B",10); pdf.set_text_color(26,29,46)
-            pdf.multi_cell(CW,6,content); pdf.set_font("Helvetica","",10)
-
-        elif stripped.startswith("- ") or stripped.startswith("* "):
-            indent    = max(0,(len(raw_line)-len(raw_line.lstrip()))//2)
-            prefix    = ("  "*indent)+"*  "
-            content   = stripped[2:].strip()
-            if not content: continue
-            indent_mm = indent*4
-            pdf.set_font("Helvetica","",10); pdf.set_text_color(26,29,46)
-            pdf.set_x(LEFT+indent_mm); pdf.multi_cell(CW-indent_mm,6,prefix+content)
-
-        elif len(stripped)>2 and stripped[0].isdigit() and stripped[1] in ".)":
-            pdf.set_font("Helvetica","",10); pdf.set_text_color(26,29,46)
-            pdf.set_x(LEFT+4); pdf.multi_cell(CW-4,6,stripped)
-
-        elif stripped in ("---","***","___"):
-            y=pdf.get_y()+2; pdf.set_draw_color(200,204,240); pdf.set_line_width(0.3)
-            pdf.line(LEFT,y,right_edge,y); pdf.ln(5)
-
-        elif stripped.startswith("|"):
-            cells=[c.strip() for c in stripped.split("|") if c.strip() and c.strip()!="---"]
+        # Table row
+        elif s.startswith("|"):
+            cells = [c.strip() for c in s.split("|")
+                     if c.strip() and not set(c.strip()) <= set("-: |")]
             if cells:
-                pdf.set_font("Helvetica","",9); pdf.set_text_color(26,29,46)
-                pdf.multi_cell(CW,5,"  |  ".join(cells))
+                pdf.set_font("Helvetica", "", 9)
+                pdf.set_text_color(26, 29, 46)
+                pdf.multi_cell(CW, 5, "  |  ".join(cells))
 
+        # Horizontal rule
+        elif s in ("---", "***", "___"):
+            y = pdf.get_y() + 2
+            pdf.set_draw_color(180, 190, 230)
+            pdf.set_line_width(0.3)
+            pdf.line(L, y, right_edge, y)
+            pdf.ln(5)
+
+        # Normal paragraph
         else:
-            pdf.set_font("Helvetica","",10); pdf.set_text_color(26,29,46)
-            pdf.set_x(LEFT); pdf.multi_cell(CW,6,line)
+            pdf.set_font("Helvetica", "", 10)
+            pdf.set_text_color(26, 29, 46)
+            pdf.set_x(L)
+            pdf.multi_cell(CW, 6, line)
 
-    total_pages = pdf.page
-    for page_num in range(1, total_pages+1):
-        pdf.page = page_num
-        pdf.set_y(-14); pdf.set_font("Helvetica","I",8); pdf.set_text_color(107,114,160)
-        pdf.set_x(LEFT)
-        pdf.cell(CW-20,8,ct(f"AI Teaching Assistant  |  {subject_code.upper()}  |  {reg_branch}  |  {semester}"))
-        pdf.cell(20,8,ct(f"Page {page_num} / {total_pages}"),align="R")
+    # ── Page numbers ──
+    total = pdf.page
+    for pg in range(1, total + 1):
+        pdf.page = pg
+        pdf.set_y(-14)
+        pdf.set_font("Helvetica", "I", 8)
+        pdf.set_text_color(120, 130, 180)
+        pdf.set_x(L)
+        pdf.cell(CW - 20, 8, safe_latin1(f"AI Teaching Assistant  |  {title}  |  {meta}"))
+        pdf.cell(20, 8, safe_latin1(f"{pg}/{total}"), align="R")
 
     return bytes(pdf.output())
 
-# =================================================================================
-# VALIDATION
-# =================================================================================
-def _pdf_ok(reg_branch: str):
-    if "⚠️" in reg_branch:
-        st.error("❌ No PDFs found. Add PDFs to `syllabus_pdfs/` folder.")
-        return None
-    p = find_pdf(reg_branch)
-    if not p or not os.path.isfile(p):
-        st.error(f"❌ PDF not found for **{reg_branch}**. Check `syllabus_pdfs/`.")
-        return None
-    return p
+# ═══════════════════════════════════════════════════════════════════════════
+#  MAIN UI
+# ═══════════════════════════════════════════════════════════════════════════
 
-# =================================================================================
-# MAIN UI
-# =================================================================================
-options = get_options()
+branches = list_branches()
+if not branches:
+    st.markdown(
+        '<div class="box-warn">No branch folders found in <code>syllabus_pdfs/</code>. '
+        'Create folders like <code>syllabus_pdfs/AIDS/</code> and add PDFs named by subject code '
+        '(e.g. <code>23AD101.pdf</code>).</div>',
+        unsafe_allow_html=True
+    )
+    branches = ["(No branches found)"]
 
+# ── Academic Details ──────────────────────────────────────────────────────
 st.markdown('<div class="sec">📚 Academic Details</div>', unsafe_allow_html=True)
-c1, c2, c3 = st.columns(3)
-reg_branch   = c1.selectbox("Regulation & Branch", options)
-semester     = c2.selectbox("Semester", [f"SEM{i}" for i in range(1, 9)])
-subject_code = c3.text_input(
-    "Subject Code",
-    placeholder="e.g. 23AD101, 20MA1T01  (needed for syllabus actions)"
+c1, c2, c3, c4 = st.columns([2, 1.5, 2, 1.5])
+
+branch   = c1.selectbox("Branch", branches)
+semester = c2.selectbox("Semester", [f"Sem {i}" for i in range(1, 9)])
+
+subjects_in_branch = list_subjects_in_branch(branch) if branch != "(No branches found)" else []
+subject_options    = subjects_in_branch if subjects_in_branch else ["(type below)"]
+subject_from_list  = c3.selectbox("Subject Code (from folder)", subject_options,
+                                   help="Select a subject code detected in your branch PDF folder")
+subject_manual     = c4.text_input("Or type subject code", placeholder="23AD101")
+
+subject_code = subject_manual.strip().upper() if subject_manual.strip() else (
+    subject_from_list if subject_from_list != "(type below)" else ""
 )
 
-# PDF status
-if "⚠️" not in reg_branch:
-    pdf_path = find_pdf(reg_branch)
+if branch not in ["(No branches found)"]:
+    pdf_path = find_subject_pdf(branch, subject_code) if subject_code else None
     if pdf_path and os.path.isfile(pdf_path):
-        size_mb = os.path.getsize(pdf_path) / (1024*1024)
-        try:
-            total_pages = len(PdfReader(pdf_path).pages)
-            page_info   = f"{total_pages} pages"
-        except Exception:
-            page_info = ""
+        size_mb = os.path.getsize(pdf_path) / (1024 * 1024)
+        pages   = get_pdf_page_count(pdf_path)
         st.markdown(
-            f'<div class="info-box">📄 <strong>{os.path.basename(pdf_path)}</strong>'
-            f'&nbsp;·&nbsp;{size_mb:.1f} MB&nbsp;·&nbsp;{page_info}'
-            f'&nbsp;·&nbsp;Claude reads this PDF directly</div>',
+            f'<div class="box-ok">PDF found: <strong>{os.path.basename(pdf_path)}</strong>'
+            f' · {size_mb:.1f} MB · {pages} pages · Claude will read this directly</div>',
             unsafe_allow_html=True
         )
-    else:
+    elif subject_code:
         st.markdown(
-            '<div class="warn-box">⚠️ PDF not found. Add your PDFs to <strong>syllabus_pdfs/</strong></div>',
+            f'<div class="box-warn"><code>{subject_code}.pdf</code> not found in '
+            f'<code>syllabus_pdfs/{branch}/</code>. '
+            f'Add the PDF or use Quick Answer / other non-PDF tools.</div>',
             unsafe_allow_html=True
         )
 
-st.markdown('<div class="sec">❓ Your Question</div>', unsafe_allow_html=True)
-question = st.text_area("", placeholder="Ask anything — topics, concepts, code problems, general doubts…", height=100)
-
-# Branch badge
-if "⚠️" not in reg_branch:
-    _prof = _get_branch_profile(reg_branch)
-    _level_colors = {
-        "CORE":    ("🔬","#00a878","Core branch — full technical answers"),
-        "RELATED": ("📘","#e6a800","Non-CS branch — simplified answers"),
-        "OTHER":   ("📖","#4f63e7","General branch — concise answers"),
-    }
-    _emoji, _color, _label = _level_colors[_prof["level"]]
+    prof = get_branch_profile(branch)
     st.markdown(
-        f'<div style="background:rgba(0,0,0,0.03);border:1px solid {_color}33;'
-        f'border-radius:8px;padding:6px 14px;font-size:0.8rem;color:{_color};'
-        f'margin-bottom:0.4rem;display:inline-block;">'
-        f'{_emoji} <strong>{reg_branch}</strong> → <strong>{_prof["level"]}</strong> — {_label}</div>',
+        f'<div style="display:inline-block;background:rgba(0,0,0,0.2);'
+        f'border:1px solid {prof["color"]}33;border-radius:8px;padding:5px 14px;'
+        f'font-size:0.78rem;color:{prof["color"]};margin:0.3rem 0;">'
+        f'{prof["emoji"]} <strong>{branch}</strong> → '
+        f'<strong>{prof["level"]}</strong> · {prof["label"]}</div>',
         unsafe_allow_html=True
     )
 
-# Action guide
-st.markdown(
-    '<div class="route-box">'
-    '📘 <b>View Full Syllabus</b> — Claude reads PDF → returns complete syllabus '
-    '<em>(needs subject code)</em>&nbsp;&nbsp;|&nbsp;&nbsp;'
-    '🎯 <b>Ask About Syllabus</b> — Claude answers from PDF, branch-aware depth '
-    '<em>(needs subject code)</em>&nbsp;&nbsp;|&nbsp;&nbsp;'
-    '⚡ <b>Quick Answer</b> — Groq answers instantly like ChatGPT '
-    '<em>(no code needed)</em>&nbsp;&nbsp;|&nbsp;&nbsp;'
-    '💻 <b>Generate Code</b> — Groq writes code '
-    '<em>(no code needed)</em>'
-    '</div>',
-    unsafe_allow_html=True
-)
+# ── TABS ──────────────────────────────────────────────────────────────────
+st.markdown('<div class="sec">📖 Tools</div>', unsafe_allow_html=True)
+tabs = st.tabs([
+    "📄 Syllabus",
+    "🎯 Ask Syllabus",
+    "🧮 Formula Sheet",
+    "📝 Topic Card",
+    "💬 Quick Answer",
+    "📅 Study Planner",
+    "📋 PYQ Answer",
+    "🧪 Exam Quiz",
+    "💻 Code Lab",
+])
 
-st.markdown('<div class="sec">⚙️ Actions</div>', unsafe_allow_html=True)
-b1, b2, b3, b4 = st.columns(4)
-btn_view    = b1.button("📘 View Full Syllabus")
-btn_ask     = b2.button("🎯 Ask About Syllabus")
-btn_quick   = b3.button("⚡ Quick Answer")
-btn_code    = b4.button("💻 Generate Code")
+# ─────────────────────────────────────────────────────────────────
+# TAB 0 — VIEW FULL SYLLABUS
+# ─────────────────────────────────────────────────────────────────
+with tabs[0]:
+    st.markdown("**Claude reads the subject PDF and returns the complete syllabus.**")
+    if st.button("📄 Load Full Syllabus", key="btn_view"):
+        if not subject_code:
+            st.warning("Select or type a subject code above.")
+        else:
+            pdf_path = find_subject_pdf(branch, subject_code)
+            if not pdf_path:
+                st.error(f"PDF not found: `syllabus_pdfs/{branch}/{subject_code}.pdf`")
+            else:
+                with st.spinner("Claude is reading the PDF…"):
+                    try:
+                        result = action_view_syllabus(pdf_path, subject_code, semester)
+                        st.session_state["last_result"] = result
+                        st.session_state["last_meta"]   = {
+                            "title": f"Syllabus - {subject_code}",
+                            "subtitle": branch,
+                            "meta": semester,
+                        }
+                        st.markdown(result)
+                    except Exception as e:
+                        st.error(f"Error: {e}")
 
-btn_diagram = st.button("📊 Search Diagrams / Flowcharts")
-language    = st.selectbox("Programming Language (for Generate Code)", ["Python","C","C++","Java"])
+    if st.session_state.get("last_result") and "Syllabus" in st.session_state["last_meta"].get("title", ""):
+        m = st.session_state["last_meta"]
+        try:
+            pdf_bytes = build_pdf(st.session_state["last_result"], m["title"], m["subtitle"], m["meta"])
+            st.download_button("⬇️ Download as PDF", pdf_bytes,
+                               f"syllabus_{subject_code}_{branch}.pdf", "application/pdf",
+                               use_container_width=True)
+        except Exception as e:
+            st.warning(f"PDF export error: {e}")
 
-st.divider()
-st.markdown('<div class="sec">📤 Output</div>', unsafe_allow_html=True)
-out = st.empty()
+# ─────────────────────────────────────────────────────────────────
+# TAB 1 — ASK ABOUT SYLLABUS
+# ─────────────────────────────────────────────────────────────────
+with tabs[1]:
+    st.markdown("**Claude reads the PDF directly and answers your question with branch-aware depth.**")
+    q_ask = st.text_area("Your question about this subject", height=100,
+                          placeholder="Explain Unit 3 of 23AD101. What is backpropagation?")
+    if st.button("🎯 Ask", key="btn_ask"):
+        if not subject_code:
+            st.warning("Select a subject code above.")
+        elif not q_ask.strip():
+            st.warning("Enter a question.")
+        else:
+            pdf_path = find_subject_pdf(branch, subject_code)
+            if not pdf_path:
+                st.error(f"PDF not found: `syllabus_pdfs/{branch}/{subject_code}.pdf`")
+            else:
+                with st.spinner("Claude is reading the PDF and composing an answer…"):
+                    try:
+                        result = action_ask_syllabus(pdf_path, subject_code, semester, q_ask, branch)
+                        st.session_state["chat_history"].append({
+                            "q": q_ask, "a": result,
+                            "subject": subject_code, "branch": branch,
+                        })
+                        st.markdown(result)
+                        try:
+                            pdf_bytes = build_pdf(result, f"QA - {subject_code}", branch, semester)
+                            st.download_button("⬇️ Download Answer", pdf_bytes,
+                                               f"answer_{subject_code}.pdf", "application/pdf")
+                        except Exception:
+                            pass
+                    except Exception as e:
+                        st.error(f"Error: {e}")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ACTION 1 — View Full Syllabus   (Claude + PDF)
-# ─────────────────────────────────────────────────────────────────────────────
-if btn_view:
-    if not subject_code.strip():
-        st.warning("⚠️ Enter a subject code to view its full syllabus.")
-    else:
-        p = _pdf_ok(reg_branch)
-        if p:
-            with st.spinner(f"📄 Claude is reading the PDF for **{subject_code.upper()}**…"):
+    if st.session_state["chat_history"]:
+        st.markdown('<div class="sec">💬 Session History</div>', unsafe_allow_html=True)
+        for item in reversed(st.session_state["chat_history"][-5:]):
+            st.markdown(f'<div class="chat-user">🧑 <strong>Q:</strong> {item["q"]}</div>',
+                        unsafe_allow_html=True)
+            with st.expander(f"View answer — {item['subject']} ({item['branch']})", expanded=False):
+                st.markdown(item["a"])
+        if st.button("🗑️ Clear History", key="clear_hist"):
+            st.session_state["chat_history"] = []
+            st.rerun()
+
+# ─────────────────────────────────────────────────────────────────
+# TAB 2 — FORMULA SHEET
+# ─────────────────────────────────────────────────────────────────
+with tabs[2]:
+    st.markdown("**Claude extracts all formulas and key definitions from the syllabus PDF.**")
+    unit_sel = st.selectbox("Unit", ["All Units", "Unit 1", "Unit 2", "Unit 3", "Unit 4", "Unit 5"])
+    if st.button("🧮 Generate Formula Sheet", key="btn_formula"):
+        if not subject_code:
+            st.warning("Select a subject code above.")
+        else:
+            pdf_path = find_subject_pdf(branch, subject_code)
+            if not pdf_path:
+                st.error(f"PDF not found: `syllabus_pdfs/{branch}/{subject_code}.pdf`")
+            else:
+                with st.spinner("Extracting formulas from PDF…"):
+                    try:
+                        result = action_formula_sheet(pdf_path, subject_code, unit_sel)
+                        st.markdown(result)
+                        try:
+                            pdf_bytes = build_pdf(result, f"Formula Sheet - {subject_code}",
+                                                  branch, unit_sel)
+                            st.download_button("⬇️ Download Formula Sheet", pdf_bytes,
+                                               f"formulas_{subject_code}_{unit_sel.replace(' ', '')}.pdf",
+                                               "application/pdf")
+                        except Exception:
+                            pass
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+
+# ─────────────────────────────────────────────────────────────────
+# TAB 3 — TOPIC STUDY CARD
+# ─────────────────────────────────────────────────────────────────
+with tabs[3]:
+    st.markdown("**Get a concise exam-ready study card for any topic in your syllabus.**")
+    topic_input = st.text_input("Topic name", placeholder="Neural Networks, OSI Model, Quicksort…")
+    if st.button("📝 Generate Study Card", key="btn_card"):
+        if not subject_code:
+            st.warning("Select a subject code above.")
+        elif not topic_input.strip():
+            st.warning("Enter a topic name.")
+        else:
+            pdf_path = find_subject_pdf(branch, subject_code)
+            if not pdf_path:
+                st.info("No PDF found — generating from general knowledge via Groq.")
+                with st.spinner("Generating study card…"):
+                    try:
+                        result = action_quick_answer(
+                            f"Give a detailed study card for: {topic_input} (subject: {subject_code})",
+                            branch
+                        )
+                        st.markdown(result)
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+            else:
+                with st.spinner("Claude is building your study card…"):
+                    try:
+                        result = action_topic_summary(pdf_path, subject_code, topic_input, branch)
+                        st.markdown(
+                            f'<div class="card"><div class="card-title">📇 Study Card: {topic_input}</div></div>',
+                            unsafe_allow_html=True
+                        )
+                        st.markdown(result)
+                        try:
+                            pdf_bytes = build_pdf(result, f"Study Card - {topic_input}", subject_code, branch)
+                            st.download_button("⬇️ Download Study Card", pdf_bytes,
+                                               f"card_{topic_input.replace(' ', '_')}.pdf",
+                                               "application/pdf")
+                        except Exception:
+                            pass
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+
+# ─────────────────────────────────────────────────────────────────
+# TAB 4 — QUICK ANSWER
+# ─────────────────────────────────────────────────────────────────
+with tabs[4]:
+    st.markdown("**Instant answers via Groq — no PDF needed. Ask anything.**")
+    q_quick = st.text_area("Question", height=100,
+                            placeholder="What is the difference between TCP and UDP?")
+    if st.button("⚡ Quick Answer", key="btn_quick"):
+        if not q_quick.strip():
+            st.warning("Enter a question.")
+        else:
+            with st.spinner("Groq is thinking…"):
                 try:
-                    result = view_syllabus_from_pdf(p, subject_code.strip().upper(), semester)
+                    result = action_quick_answer(q_quick, branch)
+                    st.markdown(result)
+                except Exception as e:
+                    st.error(f"Groq error: {e}")
 
-                    truncation_hints = [
-                        result.rstrip().endswith(("...", "…")),
-                        len(result.strip()) < 300,
-                        result.strip().endswith(("to","the","and","of","in","a","is")),
-                    ]
-                    seems_truncated = any(truncation_hints) and len(result) < 2000
+# ─────────────────────────────────────────────────────────────────
+# TAB 5 — STUDY PLANNER
+# ─────────────────────────────────────────────────────────────────
+with tabs[5]:
+    st.markdown("**AI generates a day-by-day exam study plan.**")
+    sp_c1, sp_c2 = st.columns(2)
+    sp_days  = sp_c1.slider("Study days available", 1, 30, 7)
+    sp_etype = sp_c2.selectbox("Exam type", ["Mid Exam", "End Sem", "Lab Exam", "Viva"])
+    sp_units = st.text_area("Units/Topics to cover",
+                             placeholder="Unit 1: Data Structures\nUnit 2: Trees & Graphs\nUnit 3: Sorting",
+                             height=80)
+    sp_subj  = st.text_input("Subject name (for plan header)",
+                              value=subject_code or "",
+                              placeholder="Data Structures (23CS201)")
+    if st.button("📅 Generate Study Plan", key="btn_plan"):
+        if not sp_units.strip():
+            st.warning("Enter units/topics to study.")
+        else:
+            with st.spinner("Building your study plan…"):
+                try:
+                    result = action_study_planner(sp_subj or subject_code or "Subject",
+                                                  sp_days, sp_units, sp_etype)
+                    st.markdown(result)
+                    try:
+                        pdf_bytes = build_pdf(result, f"Study Plan - {sp_subj or subject_code}",
+                                              branch, f"{sp_days}-day plan")
+                        st.download_button("⬇️ Download Plan", pdf_bytes,
+                                           f"plan_{subject_code}_{sp_days}days.pdf",
+                                           "application/pdf")
+                    except Exception:
+                        pass
+                except Exception as e:
+                    st.error(f"Error: {e}")
 
-                    st.session_state["syllabus_result"] = result
-                    st.session_state["syllabus_meta"]   = {
-                        "subject_code": subject_code.strip().upper(),
-                        "reg_branch":   reg_branch,
-                        "semester":     semester,
-                    }
+# ─────────────────────────────────────────────────────────────────
+# TAB 6 — PREVIOUS YEAR QUESTION ANSWER
+# ─────────────────────────────────────────────────────────────────
+with tabs[6]:
+    st.markdown("**Paste a previous year question and get a model exam answer.**")
+    pyq_q     = st.text_area("Previous Year Question", height=100,
+                              placeholder="Explain the working of a B+ tree with an example.")
+    pyq_c1, pyq_c2 = st.columns(2)
+    pyq_marks = pyq_c1.selectbox("Marks", [2, 5, 10, 13, 15])
+    pyq_subj  = pyq_c2.text_input("Subject", value=subject_code or "",
+                                   placeholder="23AD101 — AI & DS")
+    if st.button("📋 Generate Model Answer", key="btn_pyq"):
+        if not pyq_q.strip():
+            st.warning("Enter a question.")
+        else:
+            with st.spinner("Writing model answer…"):
+                try:
+                    result = action_pyq_answer(pyq_subj or subject_code, pyq_q, pyq_marks, branch)
+                    st.markdown(result)
+                    try:
+                        pdf_bytes = build_pdf(result, f"PYQ Answer - {pyq_subj or subject_code}",
+                                              branch, f"{pyq_marks} marks")
+                        st.download_button("⬇️ Download Answer", pdf_bytes,
+                                           f"pyq_{subject_code}_{pyq_marks}m.pdf",
+                                           "application/pdf")
+                    except Exception:
+                        pass
+                except Exception as e:
+                    st.error(f"Error: {e}")
 
+# ─────────────────────────────────────────────────────────────────
+# TAB 7 — EXAM QUIZ
+# ─────────────────────────────────────────────────────────────────
+with tabs[7]:
+    st.markdown("**Generate practice exam questions with model answers.**")
+    qz_c1, qz_c2, qz_c3 = st.columns(3)
+    qz_topic = qz_c1.text_input("Topic", placeholder="Sorting Algorithms")
+    qz_num   = qz_c2.slider("Number of questions", 3, 15, 5)
+    qz_type  = qz_c3.selectbox("Question type", ["Short Answer", "Long Answer", "MCQ", "True/False"])
+    qz_subj  = st.text_input("Subject", value=subject_code or "", placeholder="23CS201")
+    if st.button("🧪 Generate Quiz", key="btn_quiz"):
+        if not qz_topic.strip():
+            st.warning("Enter a topic.")
+        else:
+            with st.spinner("Generating exam questions…"):
+                try:
+                    result = action_exam_quiz(qz_subj or subject_code, qz_topic, qz_num, qz_type)
+                    st.markdown(result)
+                    try:
+                        pdf_bytes = build_pdf(result, f"Quiz - {qz_topic}", qz_subj or subject_code,
+                                              f"{qz_num} {qz_type} Qs")
+                        st.download_button("⬇️ Download Quiz", pdf_bytes,
+                                           f"quiz_{qz_topic.replace(' ', '_')}.pdf",
+                                           "application/pdf")
+                    except Exception:
+                        pass
+                except Exception as e:
+                    st.error(f"Error: {e}")
+
+# ─────────────────────────────────────────────────────────────────
+# TAB 8 — CODE LAB  (Multi-language execution via Groq AI)
+# ─────────────────────────────────────────────────────────────────
+with tabs[8]:
+    st.markdown("""
+**Generate code in any language and run it:**
+- 🐍 **Python** — executed live on the server
+- ☕ **Java / C / C++ / JavaScript** — executed via **Groq AI simulation** (traces output accurately)
+""")
+
+    cl_c1, cl_c2 = st.columns([3, 1])
+    code_q    = cl_c1.text_area("Describe the program", height=80,
+                                  placeholder="Write a Java program to check if a number is even or odd")
+    code_lang = cl_c2.selectbox("Language", ["Python", "Java", "C", "C++", "JavaScript"])
+
+    if st.button("💻 Generate Code", key="btn_code"):
+        if not code_q.strip():
+            st.warning("Describe the program to generate.")
+        else:
+            with st.spinner(f"Generating {code_lang} code…"):
+                try:
+                    code = action_generate_code(code_q, code_lang)
+                    st.session_state["ai_code"]      = code
+                    st.session_state["ai_code_lang"] = code_lang
+                except Exception as e:
+                    st.error(f"Error: {e}")
+
+    if st.session_state.get("ai_code", "").strip():
+        run_lang = st.session_state["ai_code_lang"]
+        st.markdown(f'<div class="sec">✏️ Edit & Run — {run_lang}</div>', unsafe_allow_html=True)
+
+        edited_code = st.text_area("Code editor", st.session_state["ai_code"], height=320,
+                                    key="code_editor")
+        stdin_input = st.text_area("Program input (stdin)", "", height=60,
+                                    placeholder="Enter input values if the program reads from stdin…")
+
+        # Execution method info
+        if run_lang == "Python":
+            st.markdown(
+                '<div class="box-info">🐍 Python will run <strong>directly</strong> on the server.</div>',
+                unsafe_allow_html=True
+            )
+        else:
+            st.markdown(
+                f'<div class="box-info">🤖 {run_lang} will be executed via <strong>Groq AI simulation</strong> '
+                f'— the AI traces through your code and returns the exact output.</div>',
+                unsafe_allow_html=True
+            )
+
+        col_run, col_clr = st.columns([3, 1])
+
+        if col_run.button("▶️ Run Code", key="btn_run"):
+
+            # ── Python: real execution ──
+            if run_lang == "Python":
+                try:
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".py",
+                                                     mode="w", encoding="utf-8") as f:
+                        f.write(edited_code)
+                        fname = f.name
+                    with st.spinner("Executing Python…"):
+                        r = subprocess.run(
+                            [sys.executable, fname],
+                            input=stdin_input,
+                            capture_output=True,
+                            text=True,
+                            timeout=30
+                        )
+                    os.unlink(fname)
+                    if r.returncode == 0:
+                        st.markdown('<div class="box-ok">✅ Python executed successfully</div>',
+                                    unsafe_allow_html=True)
+                        st.code(r.stdout or "(no output)", language="text")
+                    else:
+                        st.markdown('<div class="box-err">❌ Runtime error</div>',
+                                    unsafe_allow_html=True)
+                        st.code(r.stderr or r.stdout or "(no output)", language="text")
+                except subprocess.TimeoutExpired:
+                    st.error("⏱️ Timed out (30s limit).")
+                except Exception as e:
+                    st.error(f"Execution error: {e}")
+
+            # ── Java / C / C++ / JavaScript: AI simulation ──
+            else:
+                with st.spinner(f"Groq AI is executing {run_lang} code…"):
+                    exec_result = action_execute_code_via_ai(edited_code, run_lang, stdin_input)
+
+                if exec_result["success"]:
                     st.markdown(
-                        f'<div class="ok-box">✅ Syllabus loaded: '
-                        f'<strong>{subject_code.upper()}</strong> · {reg_branch} · {semester} '
-                        f'({len(result):,} characters)</div>',
+                        f'<div class="box-ok">✅ {run_lang} executed successfully (AI simulation)</div>',
                         unsafe_allow_html=True
                     )
-                    if seems_truncated:
-                        st.warning("⚠️ Response looks short — verify the subject code or try again.")
-
-                    out.markdown(result)
-                except Exception as e:
-                    st.error(f"❌ Error: {e}")
-
-# Persistent download button after view
-if st.session_state.get("syllabus_result"):
-    meta = st.session_state["syllabus_meta"]
-    try:
-        pdf_bytes = build_syllabus_pdf(
-            result       = st.session_state["syllabus_result"],
-            subject_code = meta["subject_code"],
-            reg_branch   = meta["reg_branch"],
-            semester     = meta["semester"],
-        )
-        fname = (
-            f"syllabus_{meta['subject_code']}_"
-            f"{meta['reg_branch'].replace(' ','')}_{meta['semester']}.pdf"
-        )
-        st.download_button(
-            label               = "⬇️ Download Syllabus as PDF",
-            data                = pdf_bytes,
-            file_name           = fname,
-            mime                = "application/pdf",
-            use_container_width = True,
-        )
-    except Exception as e:
-        st.warning(f"⚠️ PDF download unavailable: {e}")
-
-# ─────────────────────────────────────────────────────────────────────────────
-# ACTION 2 — Ask About Syllabus   (Claude + PDF)
-# Does NOT require loading syllabus first. Reads PDF directly and answers.
-# Branch-aware: CORE branches get full technical depth, others get simplified.
-# ─────────────────────────────────────────────────────────────────────────────
-if btn_ask:
-    if not subject_code.strip():
-        st.warning("⚠️ Enter a subject code so Claude knows which syllabus to reference.")
-    elif not question.strip():
-        st.warning("⚠️ Enter a question.")
-    else:
-        p = _pdf_ok(reg_branch)
-        if p:
-            profile     = _get_branch_profile(reg_branch)
-            level_emoji = {"CORE":"🔬","RELATED":"📘","OTHER":"📖"}.get(profile["level"],"📖")
-            with st.spinner(
-                f"{level_emoji} Claude is answering for **{reg_branch}** "
-                f"({profile['level']} level) using subject **{subject_code.upper()}**…"
-            ):
-                try:
-                    result = ask_syllabus_from_pdf(
-                        p,
-                        subject_code.strip().upper(),
-                        semester,
-                        question.strip(),
-                        reg_branch,
+                    st.markdown("**Output:**")
+                    st.code(exec_result["output"] or "(no output)", language="text")
+                else:
+                    st.markdown(
+                        f'<div class="box-err">❌ Error in {run_lang} code</div>',
+                        unsafe_allow_html=True
                     )
-                    out.markdown(result)
-                except Exception as e:
-                    st.error(f"❌ Error: {e}")
+                    st.markdown("**Error:**")
+                    st.code(exec_result["error"] or "(unknown error)", language="text")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ACTION 3 — Quick Answer   (Groq only — no PDF, no subject code, no branch)
-# Answers any question directly like ChatGPT using Groq.
-# ─────────────────────────────────────────────────────────────────────────────
-if btn_quick:
-    if not question.strip():
-        st.warning("⚠️ Enter a question.")
-    else:
-        with st.spinner("⚡ Groq is thinking…"):
-            try:
-                result = quick_answer_groq(question.strip())
-                out.markdown(result)
-            except Exception as e:
-                st.error(f"❌ Groq error: {e}")
+                # Also show the code with syntax highlighting
+                with st.expander("📋 View formatted code", expanded=False):
+                    lang_map = {"Java": "java", "C": "c", "C++": "cpp", "JavaScript": "javascript"}
+                    st.code(edited_code, language=lang_map.get(run_lang, "text"))
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ACTION 4 — Generate Code   (Groq only)
-# ─────────────────────────────────────────────────────────────────────────────
-if btn_code:
-    if not question.strip():
-        st.warning("⚠️ Describe what code you need.")
-    else:
-        with st.spinner(f"💻 Groq is generating {language} code…"):
-            try:
-                code = generate_code_groq(question.strip(), language)
-                st.session_state["ai_code"]      = code
-                st.session_state["ai_code_lang"] = language
-                st.code(code, language=language.lower())
-            except Exception as e:
-                st.error(f"❌ Error: {e}")
+        if col_clr.button("🗑️ Clear", key="btn_clr_code"):
+            st.session_state["ai_code"] = ""
+            st.rerun()
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Search Diagrams
-# ─────────────────────────────────────────────────────────────────────────────
-if btn_diagram:
-    if not question.strip():
-        st.warning("⚠️ Enter a topic to search diagrams for.")
-    else:
-        with st.spinner("🔍 Searching for diagrams…"):
-            show_diagrams(question.strip())
-
-# =================================================================================
-# CODE RUNNER
-# =================================================================================
-if st.session_state.get("ai_code", "").strip():
-    st.markdown('<div class="sec">🛠️ Code Editor & Runner</div>', unsafe_allow_html=True)
-    run_lang   = st.session_state.get("ai_code_lang", "Python")
-    edited     = st.text_area("Edit code before running", st.session_state["ai_code"], height=280)
-    user_input = st.text_area("Program Input (optional)", "", placeholder="stdin input if needed…")
-    if st.button("▶  Run Code"):
-        try:
-            if run_lang == "Python":
-                f = tempfile.NamedTemporaryFile(delete=False, suffix=".py")
-                f.write(edited.encode()); f.close()
-                with st.spinner("⚙️ Executing…"):
-                    r = subprocess.run(
-                        [sys.executable, f.name],
-                        input=user_input,
-                        capture_output=True, text=True, timeout=30
-                    )
-                st.success("✅ Done") if r.returncode == 0 else st.error("❌ Runtime error")
-                st.code(r.stdout or r.stderr, language="text")
-            else:
-                st.info(f"ℹ️ Copy and run {run_lang} in your local environment.")
-        except subprocess.TimeoutExpired:
-            st.error("⏱️ Timed out (30 s).")
-        except Exception as e:
-            st.error(f"Error: {e}")
-
-# =================================================================================
-# SIDEBAR
-# =================================================================================
+# ═══════════════════════════════════════════════════════════════════════════
+#  SIDEBAR
+# ═══════════════════════════════════════════════════════════════════════════
 with st.sidebar:
-    st.markdown("### 🛠️ Setup")
-    st.markdown("""
-**1. Add your PDFs**
-```
-syllabus_pdfs/
-├── r23aidssyllabus.pdf
-├── r23csesyllabus.pdf
-├── r20aimlsyllabus.pdf
-└── ...
-```
-**2. Set API Keys**
-```bash
-GROQ_API_KEY=your_key
-ANTHROPIC_API_KEY=your_key
-```
-**3. Install & Run**
-```bash
-pip install streamlit groq anthropic \\
-    duckduckgo-search pypdf fpdf2
-streamlit run app.py
-```
-    """)
+    st.markdown("## 🎓 AI Teaching Assistant")
+    st.markdown(f"**Model:** Claude `{CLAUDE_MODEL}` + Groq `{GROQ_MODEL}`")
+    st.divider()
+
+    st.markdown("### 📁 Folder Structure")
+    st.code("""syllabus_pdfs/
+├── AIDS/
+│   ├── 23AD101.pdf
+│   └── 23AD201.pdf
+├── CSE/
+│   └── 23CS101.pdf
+└── ECE/
+    └── 23EC201.pdf""", language="text")
+
+    st.markdown("### 🔑 API Keys (.env)")
+    st.code("GROQ_API_KEY=your_groq_key\nANTHROPIC_API_KEY=your_claude_key", language="bash")
+
+    st.markdown("### 📦 Install")
+    st.code("pip install streamlit groq anthropic pypdf fpdf2", language="bash")
+
+    st.markdown("### ▶️ Run")
+    st.code("streamlit run app.py", language="bash")
 
     st.divider()
-    st.markdown("### 🔀 Button Guide")
-    st.markdown("""
-| Button | Engine | Subject Code? |
-|--------|--------|---------------|
-| 📘 View Syllabus | Claude + PDF | ✅ Required |
-| 🎯 Ask Syllabus | Claude + PDF | ✅ Required |
-| ⚡ Quick Answer | Groq only | ❌ Not needed |
-| 💻 Generate Code | Groq only | ❌ Not needed |
-| 📊 Diagrams | DuckDuckGo | ❌ Not needed |
-    """)
-
-    st.divider()
-    st.markdown("### 📂 Detected PDFs")
-    if PDF_MAP:
-        for key, fname in sorted(PDF_MAP.items()):
-            try:
-                pages = len(PdfReader(os.path.join(PDF_FOLDER, fname)).pages)
-                st.markdown(f"✅ `{fname}` · {pages}p")
-            except Exception:
-                st.markdown(f"✅ `{fname}`")
+    st.markdown("### 🗂️ PDF Library")
+    if branches and branches[0] != "(No branches found)":
+        for br in branches:
+            subs = list_subjects_in_branch(br)
+            if subs:
+                st.markdown(f"**📂 {br}** ({len(subs)} subjects)")
+                for sc in subs:
+                    p  = find_subject_pdf(br, sc)
+                    pg = get_pdf_page_count(p) if p else 0
+                    st.markdown(f"  &nbsp;&nbsp;📄 `{sc}` · {pg}p")
+            else:
+                st.markdown(f"📂 {br} *(empty)*")
     else:
-        st.warning("No PDFs in `syllabus_pdfs/`")
+        st.warning("No PDFs found. Add branch folders to `syllabus_pdfs/`.")
 
-    if st.session_state.get("syllabus_result"):
-        st.divider()
-        st.markdown("### ⬇️ Last Loaded Syllabus")
-        meta = st.session_state["syllabus_meta"]
-        st.markdown(f"**{meta['subject_code']}** · {meta['reg_branch']} · {meta['semester']}")
-        try:
-            pdf_bytes = build_syllabus_pdf(
-                result       = st.session_state["syllabus_result"],
-                subject_code = meta["subject_code"],
-                reg_branch   = meta["reg_branch"],
-                semester     = meta["semester"],
-            )
-            st.download_button(
-                label     = "⬇️ Download PDF",
-                data      = pdf_bytes,
-                file_name = f"syllabus_{meta['subject_code']}.pdf",
-                mime      = "application/pdf",
-                key       = "sidebar_dl",
-            )
-        except Exception as e:
-            st.warning(f"PDF unavailable: {e}")
+    st.divider()
+    st.markdown("### 🔀 Tool Reference")
+    st.markdown("""
+| Tool | Engine | Needs PDF? |
+|---|---|---|
+| 📄 View Syllabus | Claude | Yes |
+| 🎯 Ask Syllabus | Claude | Yes |
+| 🧮 Formula Sheet | Claude | Yes |
+| 📝 Topic Card | Claude/Groq | Optional |
+| 💬 Quick Answer | Groq | No |
+| 📅 Study Planner | Groq | No |
+| 📋 PYQ Answer | Groq | No |
+| 🧪 Exam Quiz | Groq | No |
+| 💻 Code Lab | Groq+Runner | No |
+""")
+
+    st.markdown("### 💻 Code Runner Modes")
+    st.markdown("""
+| Language | Execution |
+|---|---|
+| Python | Live (subprocess) |
+| Java | Groq AI simulation |
+| C | Groq AI simulation |
+| C++ | Groq AI simulation |
+| JavaScript | Groq AI simulation |
+""")
