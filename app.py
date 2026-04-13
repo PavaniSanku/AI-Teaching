@@ -273,7 +273,7 @@ def list_subjects_in_branch(branch: str) -> list[str]:
         if f.lower().endswith(".pdf")
     )
 
-def find_subject_pdf(branch: str, subject_code: str) -> str | None:
+def find_subject_pdf(branch: str, subject_code: str) -> Optional[str]:
     folder = os.path.join(PDF_ROOT, branch.upper())
     if not os.path.isdir(folder):
         for d in os.listdir(PDF_ROOT) if os.path.isdir(PDF_ROOT) else []:
